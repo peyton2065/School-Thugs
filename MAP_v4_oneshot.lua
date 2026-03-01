@@ -525,13 +525,37 @@ local function GetChar()
 end
 
 --- Apply a uniform size scale to the local character via Model:ScaleTo()
--- Server doesn't validate or reset this — fully client-owned and replicates
--- to all other players automatically.
+-- After scaling, repositions the character so feet stay planted at ground
+-- level — prevents the floating/levitating appearance on other clients.
 -- @param value number  Scale factor (1.0 = default, 2.0 = double, etc.)
 local function ApplySize(value)
     GetChar()
     if not char or not char.Parent then return end
-    pcall(function() char:ScaleTo(value) end)
+    if not rootPart or not humanoid then return end
+
+    pcall(function()
+        -- Capture foot Y position before scaling (HRP minus hip height + half HRP height)
+        -- This is the ground level we want to preserve after scaling
+        local hipH     = humanoid.HipHeight
+        local hrpHalfY = rootPart.Size.Y / 2
+        local footY    = rootPart.Position.Y - hipH - hrpHalfY
+
+        -- Apply the scale
+        char:ScaleTo(value)
+
+        -- Recalculate where the new HRP should sit above that foot position
+        -- Hip height and HRP size have both scaled, so re-read them
+        local newHipH     = humanoid.HipHeight
+        local newHrpHalfY = rootPart.Size.Y / 2
+        local targetY     = footY + newHipH + newHrpHalfY
+
+        -- Reposition — X and Z unchanged, Y snapped back to ground
+        rootPart.CFrame = CFrame.new(
+            rootPart.Position.X,
+            targetY,
+            rootPart.Position.Z
+        ) * (rootPart.CFrame - rootPart.CFrame.Position)
+    end)
 end
 
 --- Check if a player is a friend (cached per session)
