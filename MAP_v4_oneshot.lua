@@ -280,12 +280,19 @@ local CFG = {
     PVPOffThreshold      = 25,
     PVPOnThreshold       = 80,
 
+    -- Remote Aura (hit every player simultaneously, no proximity required)
+    RemoteAura           = false,
+
     -- Kill All
     KillAllActive        = false,
     KillAllTimeout       = 8,
     KillAllTeleportDelay = 0.25,
     KillAllReteleportDist = 12,
     KillAllRetries       = 3,
+
+    -- Size Changer
+    SizeChangerEnabled   = false,
+    SizeChangerValue     = 1.0,
 
     -- New Features
     AntiAFK              = true,
@@ -515,6 +522,16 @@ local function GetChar()
         humanoid = char:FindFirstChildOfClass("Humanoid")
     end
     return char, rootPart, humanoid
+end
+
+--- Apply a uniform size scale to the local character via Model:ScaleTo()
+-- Server doesn't validate or reset this — fully client-owned and replicates
+-- to all other players automatically.
+-- @param value number  Scale factor (1.0 = default, 2.0 = double, etc.)
+local function ApplySize(value)
+    GetChar()
+    if not char or not char.Parent then return end
+    pcall(function() char:ScaleTo(value) end)
 end
 
 --- Check if a player is a friend (cached per session)
@@ -3000,9 +3017,30 @@ local function BuildGUI()
 
     local secKA = Section("Combat", "Kill All")
 
+    local tRemoteAura = Toggle("Combat", "Remote Aura (All Players, No TP)", CFG.RemoteAura, function(v)
+        CFG.RemoteAura = v
+        if v then
+            -- Disable Kill All — they're mutually exclusive
+            CFG.KillAllActive = false
+            tKillAll.Set(false)
+            if not CFG.Enabled then
+                CFG.Enabled = true
+                tEnabled.Set(true)
+                sDot.BackgroundColor3 = CLR.green
+                sLbl.Text = "ACTIVE"
+                sLbl.TextColor3 = CLR.green
+            end
+        end
+        Notify(v and "Remote Aura ACTIVE — hitting entire server" or "Remote Aura disabled", v and "warning" or "info", 2)
+        AutoSave()
+    end, secKA)
+
     local tKillAll = Toggle("Combat", "Kill All (TP & Kill)", CFG.KillAllActive, function(v)
         CFG.KillAllActive = v
         if v then
+            -- Disable Remote Aura — mutually exclusive
+            CFG.RemoteAura = false
+            tRemoteAura.Set(false)
             if not CFG.Enabled then
                 CFG.Enabled = true
                 tEnabled.Set(true)
@@ -3085,6 +3123,28 @@ local function BuildGUI()
     end, secHeal)
 
     -- === UTILITY TAB ===
+    local secSize = Section("Utility", "Size Changer")
+
+    Toggle("Utility", "Size Changer", CFG.SizeChangerEnabled, function(v)
+        CFG.SizeChangerEnabled = v
+        if v then
+            ApplySize(CFG.SizeChangerValue)
+            Notify("Size set to " .. string.format("%.1f", CFG.SizeChangerValue), "success", 2)
+        else
+            ApplySize(1.0)
+            Notify("Size reset to normal", "info", 2)
+        end
+        AutoSave()
+    end, secSize)
+
+    Slider("Utility", "Size", 0.1, 10, CFG.SizeChangerValue, function(v)
+        CFG.SizeChangerValue = v
+        if CFG.SizeChangerEnabled then
+            ApplySize(v)
+        end
+        AutoSave()
+    end, secSize)
+
     local secWeapon = Section("Utility", "Weapons")
 
     Toggle("Utility", "Auto Pickup Weapons " .. (REM.PickupTool and "✓" or "✗"),
@@ -3594,67 +3654,86 @@ task.spawn(function()
             local interval = 1 / math.max(CFG.AttacksPerSecond, 1)
             local t0 = tick()
 
-            if tick() - ST.LastTargetUpdate > CFG.TargetUpdateInterval then
-                RefreshTargets()
-            end
-
-            local tgts = ST.TargetCache
-            if #tgts > 0 then
-                if CFG.GuardDropForAttack and CFG.UseAutoGuard then
-                    SetGuard(false)
-                end
-
+            -- ═══ REMOTE AURA: blast every player simultaneously, no proximity ═══
+            -- Attack() fires raw remotes server-side; position doesn't matter.
+            -- One-shot active = everyone dies in one cycle hit.
+            if CFG.RemoteAura then
                 pcall(function()
-                    if CFG.TargetAll then
-                        -- Sort by priority
-                        if rootPart and rootPart.Parent then
-                            local mp = rootPart.Position
-                            table.sort(tgts, function(a, b)
-                                return ScoreTarget(a, mp) > ScoreTarget(b, mp)
-                            end)
-                        end
-                        local cnt = math.min(#tgts, CFG.MaxTargetsPerCycle)
-                        for i = 1, cnt do
-                            local t = tgts[i]
-                            if t and t.Parent and IsValid(t) then
-                                Attack(t)
-                                -- ESP
-                                if CFG.ESPEnabled then CreateESP(t) end
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p ~= plr and p.Character then
+                            if IsWhitelisted(p.Name) then continue end
+                            if CFG.AutoWhitelistFriends and IsFriend(p) then continue end
+                            local h = p.Character:FindFirstChildOfClass("Humanoid")
+                            if h and h.Health > 0 then
+                                Attack(p.Character)
                             end
-                        end
-                    else
-                        -- Single target with priority
-                        local best, bestScore = nil, -math.huge
-                        if rootPart and rootPart.Parent then
-                            local mp = rootPart.Position
-                            for _, c in ipairs(tgts) do
-                                if IsValid(c) then
-                                    local score = ScoreTarget(c, mp)
-                                    if score > bestScore then
-                                        bestScore = score
-                                        best = c
-                                    end
-                                end
-                            end
-                        end
-                        if best then
-                            Attack(best)
-                            if CFG.ESPEnabled then CreateESP(best) end
                         end
                     end
                 end)
+            else
+                -- Standard target cache path
+                if tick() - ST.LastTargetUpdate > CFG.TargetUpdateInterval then
+                    RefreshTargets()
+                end
 
-                -- Stomp & Stun inline
-                if CFG.UseAutoStomp and REM.Stomp then TryStomp() end
-                if CFG.UseAutoStun and REM.Stun then TryStun() end
+                local tgts = ST.TargetCache
+                if #tgts > 0 then
+                    if CFG.GuardDropForAttack and CFG.UseAutoGuard then
+                        SetGuard(false)
+                    end
 
-                if CFG.GuardDropForAttack and CFG.UseAutoGuard then
-                    task.delay(CFG.GuardReactivateDelay, function()
-                        if CFG.UseAutoGuard and CFG.Enabled and ST.Running
-                           and IsEnemyNearby(CFG.GuardActivationRange) then
-                            SetGuard(true)
+                    pcall(function()
+                        if CFG.TargetAll then
+                            -- Sort by priority
+                            if rootPart and rootPart.Parent then
+                                local mp = rootPart.Position
+                                table.sort(tgts, function(a, b)
+                                    return ScoreTarget(a, mp) > ScoreTarget(b, mp)
+                                end)
+                            end
+                            local cnt = math.min(#tgts, CFG.MaxTargetsPerCycle)
+                            for i = 1, cnt do
+                                local t = tgts[i]
+                                if t and t.Parent and IsValid(t) then
+                                    Attack(t)
+                                    -- ESP
+                                    if CFG.ESPEnabled then CreateESP(t) end
+                                end
+                            end
+                        else
+                            -- Single target with priority
+                            local best, bestScore = nil, -math.huge
+                            if rootPart and rootPart.Parent then
+                                local mp = rootPart.Position
+                                for _, c in ipairs(tgts) do
+                                    if IsValid(c) then
+                                        local score = ScoreTarget(c, mp)
+                                        if score > bestScore then
+                                            bestScore = score
+                                            best = c
+                                        end
+                                    end
+                                end
+                            end
+                            if best then
+                                Attack(best)
+                                if CFG.ESPEnabled then CreateESP(best) end
+                            end
                         end
                     end)
+
+                    -- Stomp & Stun inline
+                    if CFG.UseAutoStomp and REM.Stomp then TryStomp() end
+                    if CFG.UseAutoStun and REM.Stun then TryStun() end
+
+                    if CFG.GuardDropForAttack and CFG.UseAutoGuard then
+                        task.delay(CFG.GuardReactivateDelay, function()
+                            if CFG.UseAutoGuard and CFG.Enabled and ST.Running
+                               and IsEnemyNearby(CFG.GuardActivationRange) then
+                                SetGuard(true)
+                            end
+                        end)
+                    end
                 end
             end
 
@@ -3798,8 +3877,9 @@ task.spawn(function()
                     and tostring(math.floor(humanoid.Health)) or "?"
 
                 s.mode.Text = CFG.KillAllActive and "KILL ALL"
+                    or CFG.RemoteAura and "REMOTE AURA"
                     or (CFG.TargetAll and "AoE" or "Single")
-                s.mode.TextColor3 = CFG.KillAllActive and CLR.cyan or CLR.text
+                s.mode.TextColor3 = (CFG.KillAllActive or CFG.RemoteAura) and CLR.cyan or CLR.text
 
                 s.nearby.Text = ST.EnemyNearby and "YES" or "NO"
                 s.nearby.TextColor3 = ST.EnemyNearby and CLR.yellow or CLR.textDim
@@ -3872,6 +3952,13 @@ Conn(plr.CharacterAdded, function(newChar)
 
     Notify("Respawned — systems reinitializing", "info", 2)
     AddLogEntry("system", "Respawned")
+
+    -- Reapply size after spawn — wait for character to fully load first
+    if CFG.SizeChangerEnabled then
+        task.delay(0.5, function()
+            ApplySize(CFG.SizeChangerValue)
+        end)
+    end
 
     task.delay(1, ScanForFoodItems)
 
