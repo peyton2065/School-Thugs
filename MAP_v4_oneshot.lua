@@ -525,8 +525,9 @@ local function GetChar()
 end
 
 --- Apply a uniform size scale to the local character via Model:ScaleTo()
--- After scaling, repositions the character so feet stay planted at ground
--- level — prevents the floating/levitating appearance on other clients.
+-- Uses a raycast to find actual ground level before scaling, then defers
+-- the repositioning one frame so HipHeight and HRP.Size have settled.
+-- Keeps feet planted on the ground as seen by all clients.
 -- @param value number  Scale factor (1.0 = default, 2.0 = double, etc.)
 local function ApplySize(value)
     GetChar()
@@ -534,27 +535,44 @@ local function ApplySize(value)
     if not rootPart or not humanoid then return end
 
     pcall(function()
-        -- Capture foot Y position before scaling (HRP minus hip height + half HRP height)
-        -- This is the ground level we want to preserve after scaling
-        local hipH     = humanoid.HipHeight
-        local hrpHalfY = rootPart.Size.Y / 2
-        local footY    = rootPart.Position.Y - hipH - hrpHalfY
+        -- Raycast straight down from HRP to find real ground Y
+        -- Exclude own character so we don't hit our own parts
+        local rayParams = RaycastParams.new()
+        rayParams.FilterDescendantsInstances = { char }
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        local hit = workspace:Raycast(
+            rootPart.Position,
+            Vector3.new(0, -100, 0),
+            rayParams
+        )
+        -- Fall back to estimated ground if raycast misses (e.g. over a void)
+        local groundY = hit and hit.Position.Y
+            or (rootPart.Position.Y - humanoid.HipHeight - rootPart.Size.Y / 2)
 
-        -- Apply the scale
+        -- Apply the scale — HRP stays in place, legs grow, physics will lift
         char:ScaleTo(value)
 
-        -- Recalculate where the new HRP should sit above that foot position
-        -- Hip height and HRP size have both scaled, so re-read them
-        local newHipH     = humanoid.HipHeight
-        local newHrpHalfY = rootPart.Size.Y / 2
-        local targetY     = footY + newHipH + newHrpHalfY
+        -- Defer one frame so HipHeight + HRP.Size reflect the new scale
+        task.defer(function()
+            GetChar()
+            if not rootPart or not rootPart.Parent then return end
 
-        -- Reposition — X and Z unchanged, Y snapped back to ground
-        rootPart.CFrame = CFrame.new(
-            rootPart.Position.X,
-            targetY,
-            rootPart.Position.Z
-        ) * (rootPart.CFrame - rootPart.CFrame.Position)
+            -- Calculate where HRP needs to be so feet sit exactly at groundY
+            local newHipH     = humanoid.HipHeight
+            local newHrpHalfY = rootPart.Size.Y / 2
+            local targetY     = groundY + newHipH + newHrpHalfY
+
+            -- Preserve rotation, only correct Y
+            rootPart.CFrame = CFrame.new(
+                rootPart.Position.X,
+                targetY,
+                rootPart.Position.Z
+            ) * CFrame.fromMatrix(
+                Vector3.zero,
+                rootPart.CFrame.XVector,
+                rootPart.CFrame.YVector
+            )
+        end)
     end)
 end
 
