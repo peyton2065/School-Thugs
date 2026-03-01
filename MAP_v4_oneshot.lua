@@ -111,7 +111,10 @@ local CAN_FIRE_PROMPT = type(fireproximityprompt) == "function"
 local CAN_SET_CLIPBOARD = type(setclipboard) == "function"
 
 ----------------------------------------------------------------
--- S0b. ONE-SHOT DAMAGE HOOK (KILL ALL ONLY)
+-- S0b. ONE-SHOT DAMAGE FLAG
+-- PUNCH_REMOTE is discovered here so Attack() can send -9e9 damage
+-- directly in FireServer args — no namecall hook needed, no checkcaller
+-- conflict. Works universally across all combat modes on Xeno.
 ----------------------------------------------------------------
 local ONESHOT_HOOKED = false
 local PUNCH_REMOTE = nil
@@ -124,22 +127,9 @@ pcall(function()
     if not PUNCH_REMOTE then
         PUNCH_REMOTE = game:GetService("ReplicatedStorage"):FindFirstChild("PUNCHEVENT", true)
     end
-
-    if PUNCH_REMOTE and hookmetamethod then
-        getgenv().replacement = vector.create(0, -9e9, 0)
-        local oldNamecall
-        oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-            local method = getnamecallmethod():lower()
-            local args = {...}
-            if not checkcaller() and self == PUNCH_REMOTE
-               and method == "fireserver" then
-                args[3] = getgenv().replacement
-                return oldNamecall(self, unpack(args))
-            end
-            return oldNamecall(self, ...)
-        end)
+    if PUNCH_REMOTE then
         ONESHOT_HOOKED = true
-        print("[MAP] One-shot punch hook active (Kill All only)")
+        print("[MAP] One-shot punch active — damage arg will be -9e9")
     end
 end)
 
@@ -1065,6 +1055,8 @@ local function ScoreTarget(model, playerPos)
 end
 
 --- Fire attack remotes at a target
+-- When ONESHOT_HOOKED, passes -9e9 as the damage arg directly in FireServer
+-- so the server registers an instant kill. Falls back to 50 if not active.
 -- @param target Model
 local function Attack(target)
     if not target or not target.Parent then return end
@@ -1073,24 +1065,27 @@ local function Attack(target)
         or target:FindFirstChild("HumanoidRootPart")
     if not part then return end
 
+    -- Damage value: -9e9 for one-shot, 50 for normal
+    local dmg = ONESHOT_HOOKED and -9e9 or 50
+
     pcall(function()
         local usedTool = false
         if CFG.PreferWeaponOverFist and CFG.UseToolAttack and REM.ToolHit then
             REM.ToolHit:FireServer(target, part)
-            REM.ToolHit:FireServer(1, target, 50, part)
+            REM.ToolHit:FireServer(1, target, dmg, part)
             ST.TotalToolHits += 1
             usedTool = true
         end
 
         if not usedTool or not CFG.PreferWeaponOverFist then
             if CFG.UsePunch and REM.Punch then
-                REM.Punch:FireServer(1, target, 50, part)
+                REM.Punch:FireServer(1, target, dmg, part)
             end
             if CFG.UseSuplex and REM.Suplex then
-                REM.Suplex:FireServer(1, target, 50, part)
+                REM.Suplex:FireServer(1, target, dmg, part)
             end
             if CFG.UseHeavyHit and REM.HeavyHit then
-                REM.HeavyHit:FireServer(1, target, 50, part)
+                REM.HeavyHit:FireServer(1, target, dmg, part)
             end
         end
 
@@ -1588,16 +1583,16 @@ end
 ----------------------------------------------------------------
 
 --- Run the Kill All targeting loop
--- One-shot path: teleport → 3 burst punches (hook swaps damage to -9e9) → next target
--- Fallback path: original grind loop (used when hookmetamethod unavailable)
+-- Attack() now carries the one-shot damage value (-9e9) directly when
+-- ONESHOT_HOOKED is true, so this loop needs no special casing.
 local function RunKillAll()
-    if not PUNCH_REMOTE and not HAS_ATTACK then
+    if not HAS_ATTACK then
         Notify("No attack remotes found", "error")
         return
     end
     ST.KillAllRunning = true
     ST.CurrentMode = "KillAll"
-    Notify(ONESHOT_HOOKED and "Kill All [ONE-SHOT] engaged" or "Kill All engaged", "warning", 2)
+    Notify("Kill All engaged" .. (ONESHOT_HOOKED and " [ONE-SHOT]" or ""), "warning", 2)
     AddLogEntry("system", "Kill All STARTED" .. (ONESHOT_HOOKED and " (one-shot)" or ""))
 
     while CFG.KillAllActive and CFG.Enabled and ST.Running do
@@ -1670,65 +1665,34 @@ local function RunKillAll()
                 end
             end
 
-            -- ═══ ONE-SHOT KILL LOGIC ═══
-            if ONESHOT_HOOKED and PUNCH_REMOTE then
-                local part = tChar:FindFirstChild(CFG.TargetPart)
-                    or tChar:FindFirstChild("UpperTorso")
-                    or tChar:FindFirstChild("HumanoidRootPart")
+            -- Attack loop — Attack() handles one-shot damage internally
+            local startTime = tick()
+            while CFG.KillAllActive and CFG.Enabled and ST.Running do
+                tChar = target.Character
+                if not tChar then break end
+                tHum = tChar:FindFirstChildOfClass("Humanoid")
+                tRoot = tChar:FindFirstChild("HumanoidRootPart")
+                if not tHum or tHum.Health <= 0 or not tRoot then break end
 
-                if part then
-                    -- Fire hooked punch — hook swaps arg3 to vector(0, -9e9, 0)
-                    -- Burst 3 times to guarantee server processes at least one
-                    for burst = 1, 3 do
-                        pcall(function()
-                            PUNCH_REMOTE:FireServer(1, tChar, 50, part)
-                        end)
-                        task.wait(0.05)
+                GetChar()
+                if not rootPart or not rootPart.Parent then break end
+                if tick() - startTime > CFG.KillAllTimeout then break end
 
-                        -- Early exit if already dead
-                        tHum = tChar:FindFirstChildOfClass("Humanoid")
-                        if not tHum or tHum.Health <= 0 then break end
-                    end
-
-                    -- Stomp if downed but not confirmed dead
-                    if CFG.UseAutoStomp and REM.Stomp then
-                        if tHum and tHum.Health > 0 and IsPlayerDown(tChar) then
-                            pcall(function() REM.Stomp:FireServer() end)
-                            ST.TotalStomps += 1
-                        end
-                    end
+                local dist = (rootPart.Position - tRoot.Position).Magnitude
+                if dist > CFG.KillAllReteleportDist then
+                    rootPart.CFrame = tRoot.CFrame * CFrame.new(0, 0, 3)
+                    InvalidateNearbyCache()
+                    task.wait(0.05)
                 end
 
-            -- ═══ FALLBACK: NORMAL ATTACK LOOP ═══
-            else
-                local startTime = tick()
-                while CFG.KillAllActive and CFG.Enabled and ST.Running do
-                    tChar = target.Character
-                    if not tChar then break end
-                    tHum = tChar:FindFirstChildOfClass("Humanoid")
-                    tRoot = tChar:FindFirstChild("HumanoidRootPart")
-                    if not tHum or tHum.Health <= 0 or not tRoot then break end
+                Attack(tChar)
 
-                    GetChar()
-                    if not rootPart or not rootPart.Parent then break end
-                    if tick() - startTime > CFG.KillAllTimeout then break end
-
-                    local dist = (rootPart.Position - tRoot.Position).Magnitude
-                    if dist > CFG.KillAllReteleportDist then
-                        rootPart.CFrame = tRoot.CFrame * CFrame.new(0, 0, 3)
-                        InvalidateNearbyCache()
-                        task.wait(0.05)
-                    end
-
-                    Attack(tChar)
-
-                    if CFG.UseAutoStomp and REM.Stomp and IsPlayerDown(tChar) then
-                        pcall(function() REM.Stomp:FireServer() end)
-                        ST.TotalStomps += 1
-                    end
-
-                    task.wait(1 / math.max(CFG.AttacksPerSecond, 1))
+                if CFG.UseAutoStomp and REM.Stomp and IsPlayerDown(tChar) then
+                    pcall(function() REM.Stomp:FireServer() end)
+                    ST.TotalStomps += 1
                 end
+
+                task.wait(1 / math.max(CFG.AttacksPerSecond, 1))
             end
 
             -- Check kill
@@ -1747,14 +1711,14 @@ local function RunKillAll()
             end
 
             if CFG.KillAllActive and CFG.Enabled and ST.Running then
-                task.wait(ONESHOT_HOOKED and 0.1 or CFG.KillAllTeleportDelay)
+                task.wait(CFG.KillAllTeleportDelay)
             end
         end
 
         if CFG.KillAllActive and CFG.Enabled and ST.Running then
             ST.KillAllTarget = "Scanning..."
             ST.KillAllProgress = ""
-            task.wait(ONESHOT_HOOKED and 0.5 or 1.5)
+            task.wait(1.5)
         end
     end
 
