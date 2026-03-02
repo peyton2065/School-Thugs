@@ -57,16 +57,16 @@
 
 local SCRIPT_VERSION = "5.1"
 --[[
-  CHANGELOG v5.0 → v5.1 (BUG FIX PASS):
-  [FIX 1] Loop 1: per-target teleport added to standard AoE path — kill aura now lands hits
-  [FIX 2] _espStatUpdate nil-reference declared before UpdateESP() — ESP no longer errors every 0.15s
-  [FIX 3] ToolHit:FireServer() signatures normalized — no more double-fire / arg mismatch
-  [FIX 4] RANDOMS_BLOCKING gated into Attack() pre-fire check — blocked targets skipped
-  [FIX 5] Conn() nil-guards signal before Connect() — no more silent crash on missing RANDOMS children
-  [FIX 6] RemoteAura branch now runs full IsValid() — ForceField/TeamFilter/PVP respected
-  [FIX 7] Sorted target list cached between RefreshTargets() calls — ~95% fewer GetPlayerFromCharacter calls
-  [FIX 8] TryPickupTools() tier-waits moved into task.spawn — Loop 3 no longer stalls 0.6s per cycle
-  [FIX 9] DPSHistory capped proactively in RecordDamage() — no unbounded growth
+  CHANGELOG v5.0 -> v5.1 (BUG FIX PASS):
+  [FIX 1] Loop 1: per-target teleport added to standard AoE path - kill aura now lands hits
+  [FIX 2] _espStatUpdate nil-reference declared before UpdateESP() - ESP no longer errors every 0.15s
+  [FIX 3] ToolHit:FireServer() signatures normalized - no more double-fire / arg mismatch
+  [FIX 4] RANDOMS_BLOCKING gated into Attack() pre-fire check - blocked targets skipped
+  [FIX 5] Conn() nil-guards signal before Connect() - no more silent crash on missing RANDOMS children
+  [FIX 6] RemoteAura branch now runs full IsValid() - ForceField/TeamFilter/PVP respected
+  [FIX 7] Sorted target list cached between RefreshTargets() calls - ~95% fewer GetPlayerFromCharacter calls
+  [FIX 8] TryPickupTools() tier-waits moved into task.spawn - Loop 3 no longer stalls 0.6s per cycle
+  [FIX 9] DPSHistory capped proactively in RecordDamage() - no unbounded growth
   [FIX 10] GuardActivationRange slider invalidates nearby cache on change
 ]]
 
@@ -441,7 +441,7 @@ local ST = {
     AuraRing          = nil,
     AuraConn          = nil,
 
-    -- Fix 7: cached sorted target list — rebuilt only when RefreshTargets fires
+    -- Fix 7: cached sorted target list - rebuilt only when RefreshTargets fires
     SortedTargetCache      = {},
     SortedTargetCacheDirty = true,
 
@@ -2124,7 +2124,7 @@ local function ClearAllESP()
     for model, _ in pairs(ST.ESPPool) do RemoveESP(model) end
 end
 
--- Fix 2: _espStatUpdate was referenced but never declared — caused nil arithmetic error every 0.15s
+-- Fix 2: _espStatUpdate was referenced but never declared - caused nil arithmetic error every 0.15s
 local _espStatUpdate = 0
 
 local function UpdateESP()
@@ -4389,7 +4389,7 @@ task.spawn(function()
 
                 local myPos = rootPart.Position
 
-                -- Fix 6: RemoteAura now runs full IsValid() — ForceField, TeamFilter, PVP all respected
+                -- Fix 6: RemoteAura now runs full IsValid() - ForceField, TeamFilter, PVP all respected
                 if CFG.RemoteAura and HAS_ATTACK then
                     for _, p in ipairs(Players:GetPlayers()) do
                         if p ~= plr and p.Character then
@@ -4425,7 +4425,7 @@ task.spawn(function()
                         if attacked >= limit then break end
                         local model = entry.model
                         if not model or not model.Parent then
-                            -- model gone — mark list dirty for next tick
+                            -- model gone - mark list dirty for next tick
                             ST.SortedTargetCacheDirty = true
                         else
                             local hrp = model:FindFirstChild("HumanoidRootPart")
